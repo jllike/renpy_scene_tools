@@ -1,7 +1,7 @@
+import argparse
 import datetime
 import json
 import os
-import sys
 from pathlib import Path
 
 import cv2
@@ -156,6 +156,11 @@ def make_psd(scene_assets):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Generate PSD files from asset tracking JSON")
+    parser.add_argument("--start", type=int, default=1, help="First scene number to process (1-based)")
+    parser.add_argument("--count", type=int, default=0, help="Number of scenes to process (0 = all remaining)")
+    args = parser.parse_args()
+
     if not JSON_PATH.exists():
         raise FileNotFoundError(f"JSON file not found: {JSON_PATH}")
 
@@ -171,18 +176,24 @@ def main():
     scenes = group_scenes(assets)
     log(f"Total scenes: {len(scenes)}")
 
+    start = args.start
+    count = args.count if args.count > 0 else len(scenes) - start + 1
+    end = min(start + count - 1, len(scenes))
+    log(f"Processing scenes {start} to {end}")
+
     now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     batch_dir = OUTPUT_DIR / now
     batch_dir.mkdir(parents=True, exist_ok=True)
 
-    for i, scene in enumerate(scenes, 1):
+    for i in range(start, end + 1):
+        scene = scenes[i - 1]
         log(f"Scene {i}/{len(scenes)}: {len(scene)} layers, base={scene[0]['file']}")
         psd = make_psd(scene)
         out_path = batch_dir / f"scene_{i:04d}.psd"
         psd.save(str(out_path))
         log(f"  Saved: {out_path.name}")
 
-    log(f"\nDone! {len(scenes)} PSD files saved to:\n  {batch_dir}")
+    log(f"\nDone! Scenes {start}-{end} saved to:\n  {batch_dir}")
 
 
 if __name__ == "__main__":
