@@ -6,4 +6,6 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "pillow>=12.2.0",
+    "psd-tools>=1.10.0",
+    "opencv-python>=4.0.0",
 ]
