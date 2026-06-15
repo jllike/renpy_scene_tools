@@ -121,7 +121,7 @@ wheels = [
 ]
 
 [[package]]
-name = "scene-filter"
+name = "renpy-scene-tools"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

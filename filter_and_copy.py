@@ -8,8 +8,9 @@ from PIL import Image
 
 SCRIPT_DIR = Path(__file__).parent
 GAME_ROOT = SCRIPT_DIR.parent
-JSON_PATH = GAME_ROOT / "保存的一幕.json"
-CLEAN_JSON_PATH = SCRIPT_DIR / "保存的一幕_clean.json"
+JSON_PATH = GAME_ROOT / "快照.json"
+OUTPUT_PATH = SCRIPT_DIR / "snap"
+CLEAN_JSON_PATH = OUTPUT_PATH / "快照_clean.json"
 IMAGES_DIR = GAME_ROOT / "game" / "images"
 
 VIDEO_EXTS = {".webm", ".mp4", ".mov", ".avi", ".ogv", ".mkv"}
@@ -72,6 +73,7 @@ def step1_filter():
                 clean_entry["layers"][layer_name] = visible
         clean_data.append(clean_entry)
 
+    CLEAN_JSON_PATH.parent.mkdir(exist_ok=True)
     CLEAN_JSON_PATH.write_text(
         json.dumps(clean_data, ensure_ascii=False, indent=2), encoding="utf-8"
     )
@@ -81,7 +83,7 @@ def step1_filter():
 
 def step2_copy():
     now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    batch_dir = SCRIPT_DIR / ("素材_" + now)
+    batch_dir = OUTPUT_PATH / ("素材_" + now)
     clean_data = json.loads(CLEAN_JSON_PATH.read_text(encoding="utf-8"))
     for entry in clean_data:
         ts = entry["timestamp"].replace(":", "-").replace(" ", "_")

@@ -1,5 +1,5 @@
 [project]
-name = "scene-filter"
+name = "renpy_scene_tools"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"

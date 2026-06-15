@@ -1,0 +1,28 @@
+[
+  {
+    "timestamp": "2026-06-15 14:17:26",
+    "label": "",
+    "layers": {
+      "master": [
+        {
+          "tag": "toaster",
+          "zorder": 0,
+          "name": [
+            "toaster"
+          ],
+          "file": "Toaster.webp",
+          "type": "image"
+        },
+        {
+          "tag": "Toastertext2",
+          "zorder": 0,
+          "name": [
+            "Toastertext2"
+          ],
+          "file": "Toastertext2.webp",
+          "type": "image"
+        }
+      ]
+    }
+  }
+]
