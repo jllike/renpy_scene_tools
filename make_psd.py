@@ -2,6 +2,7 @@ import argparse
 import datetime
 import json
 import os
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
 import cv2
@@ -15,9 +16,6 @@ IMAGES_DIR = GAME_ROOT / "game" / "images"
 OUTPUT_DIR = SCRIPT_DIR / "psd"
 
 VIDEO_EXTS = {".webm", ".mp4", ".mov", ".avi", ".ogv", ".mkv"}
-
-_opaque_cache = {}
-_image_cache = {}
 
 
 def log(msg):
@@ -40,47 +38,19 @@ def resolve_filepath(filename):
     return None
 
 
-def is_opaque(filepath):
-    key = str(filepath)
-    if key in _opaque_cache:
-        return _opaque_cache[key]
-
+def check_opaque(filepath):
     ext = os.path.splitext(filepath)[1].lower()
     if ext in VIDEO_EXTS:
-        _opaque_cache[key] = True
         return True
     try:
         img = Image.open(filepath)
         if img.mode in ("RGBA", "LA", "PA"):
             alpha = img.getchannel("A")
             extrema = alpha.getextrema()
-            result = extrema[0] == 255
-        else:
-            result = True
-        _opaque_cache[key] = result
-        return result
+            return extrema[0] == 255
+        return True
     except Exception as e:
         raise RuntimeError(f"Failed to check opacity of {filepath}: {e}")
-
-
-def load_image(filepath):
-    key = str(filepath)
-    if key in _image_cache:
-        return _image_cache[key].copy()
-
-    ext = os.path.splitext(filepath)[1].lower()
-    if ext in VIDEO_EXTS:
-        img = extract_video_frame(filepath)
-    else:
-        try:
-            img = Image.open(filepath)
-            if img.mode != "RGBA":
-                img = img.convert("RGBA")
-        except Exception as e:
-            raise RuntimeError(f"Failed to load image {filepath}: {e}")
-
-    _image_cache[key] = img.copy()
-    return img
 
 
 def extract_video_frame(filepath):
@@ -103,38 +73,25 @@ def extract_video_frame(filepath):
         raise RuntimeError(f"Failed to extract frame from video {filepath}: {e}")
 
 
-def group_scenes(assets):
-    scenes = []
-    current_scene = None
-
-    for i, asset in enumerate(assets):
-        if i % 500 == 0:
-            log(f"  Grouping... {i}/{len(assets)}")
-
-        fp = resolve_filepath(asset["file"])
-        if fp is None:
-            raise FileNotFoundError(f"Asset file not found: {asset['file']}")
-
-        if is_opaque(fp):
-            if current_scene is not None:
-                scenes.append(current_scene)
-            current_scene = [asset]
-        else:
-            if current_scene is None:
-                raise RuntimeError(
-                    f"First asset in list is transparent: {asset['file']} (idx={asset['idx']}). "
-                    "Expected an opaque base image to start the first scene."
-                )
-            current_scene.append(asset)
-
-    if current_scene is not None:
-        scenes.append(current_scene)
-
-    return scenes
+def load_image(filepath):
+    ext = os.path.splitext(filepath)[1].lower()
+    if ext in VIDEO_EXTS:
+        img = extract_video_frame(filepath)
+    else:
+        try:
+            img = Image.open(filepath)
+            if img.mode != "RGBA":
+                img = img.convert("RGBA")
+        except Exception as e:
+            raise RuntimeError(f"Failed to load image {filepath}: {e}")
+    return img
 
 
-def make_psd(scene_assets):
-    base_asset = scene_assets[0]
+def process_scene(args):
+    scene_num, scene, batch_dir_str = args
+    batch_dir = Path(batch_dir_str)
+
+    base_asset = scene[0]
     base_fp = resolve_filepath(base_asset["file"])
     if base_fp is None:
         raise FileNotFoundError(f"Base asset not found: {base_asset['file']}")
@@ -144,7 +101,7 @@ def make_psd(scene_assets):
     base_layer = psd.create_pixel_layer(base_img, name=os.path.basename(base_asset["file"]))
     psd.append(base_layer)
 
-    for asset in scene_assets[1:]:
+    for asset in scene[1:]:
         fp = resolve_filepath(asset["file"])
         if fp is None:
             raise FileNotFoundError(f"Asset file not found: {asset['file']}")
@@ -152,13 +109,16 @@ def make_psd(scene_assets):
         layer = psd.create_pixel_layer(img, name=os.path.basename(asset["file"]))
         psd.append(layer)
 
-    return psd
+    out_path = batch_dir / f"scene_{scene_num:04d}.psd"
+    psd.save(str(out_path))
+    return scene_num, len(scene), os.path.basename(base_asset["file"]), out_path.name
 
 
 def main():
     parser = argparse.ArgumentParser(description="Generate PSD files from asset tracking JSON")
     parser.add_argument("--start", type=int, default=1, help="First scene number to process (1-based)")
     parser.add_argument("--count", type=int, default=0, help="Number of scenes to process (0 = all remaining)")
+    parser.add_argument("--workers", type=int, default=0, help="Number of parallel workers (0 = auto)")
     args = parser.parse_args()
 
     if not JSON_PATH.exists():
@@ -171,27 +131,74 @@ def main():
         return
 
     log(f"Total assets: {len(assets)}")
-    log("Grouping assets into scenes...")
 
-    scenes = group_scenes(assets)
+    log("Phase 1: Resolving filepaths and checking opacity in parallel...")
+    resolved = []
+    for asset in assets:
+        fp = resolve_filepath(asset["file"])
+        if fp is None:
+            raise FileNotFoundError(f"Asset file not found: {asset['file']}")
+        resolved.append((asset, fp))
+
+    workers = args.workers if args.workers > 0 else None
+    opaque_results = []
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(check_opaque, fp): i for i, (_, fp) in enumerate(resolved)}
+        done_count = 0
+        for future in as_completed(futures):
+            idx = futures[future]
+            result = future.result()
+            opaque_results.append((idx, result))
+            done_count += 1
+            if done_count % 500 == 0:
+                log(f"  Opacity check: {done_count}/{len(resolved)}")
+
+    opaque_map = {}
+    for idx, result in opaque_results:
+        opaque_map[idx] = result
+
+    log("Phase 2: Grouping assets into scenes...")
+    scenes = []
+    current_scene = None
+    for i, (asset, fp) in enumerate(resolved):
+        if opaque_map[i]:
+            if current_scene is not None:
+                scenes.append(current_scene)
+            current_scene = [asset]
+        else:
+            if current_scene is None:
+                raise RuntimeError(
+                    f"First asset in list is transparent: {asset['file']} (idx={asset['idx']}). "
+                    "Expected an opaque base image to start the first scene."
+                )
+            current_scene.append(asset)
+    if current_scene is not None:
+        scenes.append(current_scene)
+
     log(f"Total scenes: {len(scenes)}")
 
     start = args.start
     count = args.count if args.count > 0 else len(scenes) - start + 1
     end = min(start + count - 1, len(scenes))
-    log(f"Processing scenes {start} to {end}")
 
     now = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     batch_dir = OUTPUT_DIR / now
     batch_dir.mkdir(parents=True, exist_ok=True)
 
+    log(f"Phase 3: Generating PSD files (scenes {start}-{end}) with parallel workers...")
+
+    tasks = []
     for i in range(start, end + 1):
-        scene = scenes[i - 1]
-        log(f"Scene {i}/{len(scenes)}: {len(scene)} layers, base={scene[0]['file']}")
-        psd = make_psd(scene)
-        out_path = batch_dir / f"scene_{i:04d}.psd"
-        psd.save(str(out_path))
-        log(f"  Saved: {out_path.name}")
+        tasks.append((i, scenes[i - 1], str(batch_dir)))
+
+    completed = 0
+    total = len(tasks)
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(process_scene, task): task[0] for task in tasks}
+        for future in as_completed(futures):
+            scene_num, num_layers, base_name, saved_name = future.result()
+            completed += 1
+            log(f"  [{completed}/{total}] Scene {scene_num}: {num_layers} layers, {saved_name}")
 
     log(f"\nDone! Scenes {start}-{end} saved to:\n  {batch_dir}")
 
